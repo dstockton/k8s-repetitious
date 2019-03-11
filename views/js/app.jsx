@@ -10,7 +10,7 @@ class Home extends React.Component {
   }
 
   serverRequest() {
-    $.get("http://127.0.0.1:3000/api/deployments", res => {
+    $.get("http://127.0.0.1:3000/api/aggregate-deployments", res => {
       this.setState({
         deployments: res,
         allDeployments: res

@@ -1,11 +1,13 @@
 package main
 
 import (
-	"flag"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/contrib/static"
@@ -15,24 +17,43 @@ import (
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 	rest2 "k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
-var deployments map[string]*v1beta1.DeploymentList
-var kubeconfig *string
+// Caches the aggregated deployment lists
+var aggregateDeployments map[string]*v1beta1.DeploymentList
+
+// Caches the local deployment list
+var localDeployments *v1beta1.DeploymentList
 
 type configAndClientSet struct {
 	config    *rest2.Config
 	clientset *kubernetes.Clientset
 }
 
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
+}
+
 func main() {
-	deployments = make(map[string]*v1beta1.DeploymentList)
+	// Initialise the empty aggregated deployment lists
+	aggregateDeployments = make(map[string]*v1beta1.DeploymentList)
 
-	// Refresh from kube-API every X seconds
-	go getDeploymentLoop(1)
+	// Load list of repetious endpoints
+	remotes := strings.Split(getEnv("REPETIOUS_REMOTES", "127.0.0.1:3000"), ",")
 
-	// Setup gin
+	remotePollDelay, _ := time.ParseDuration(getEnv("REMOTE_POLL_DELAY", "5"))
+	localPollDelay, _ := time.ParseDuration(getEnv("LOCAL_POLL_DELAY", "5"))
+
+	// Refresh from remote repetitious API every X seconds
+	go getRemoteDeploymentsLoop(remotes, remotePollDelay)
+
+	// Refresh from local kube API every X seconds
+	go getLocalDeploymentsLoop(localPollDelay)
+
+	// Setup gin (HTTP server)
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -43,6 +64,7 @@ func main() {
 	// Define API routes
 	api := router.Group("/api")
 	{
+		api.GET("/aggregate-deployments", aggregateDeploymentHandler)
 		api.GET("/deployments", deploymentHandler)
 	}
 
@@ -51,50 +73,65 @@ func main() {
 	router.Run(":3000")
 }
 
-func buildConfigFromFlags(context, kubeconfigPath string) (*rest2.Config, error) {
-	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath},
-		&clientcmd.ConfigOverrides{
-			CurrentContext: context,
-		}).ClientConfig()
+func getRemoteDeployments(url string) *v1beta1.DeploymentList {
+	spaceClient := http.Client{
+		Timeout: time.Second * 2, // Maximum of 2 secs
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		log.Println(err)
+		return &v1beta1.DeploymentList{}
+	}
+
+	req.Header.Set("User-Agent", "repetitious-k8s-dashboard")
+
+	res, getErr := spaceClient.Do(req)
+	if getErr != nil {
+		log.Println(getErr)
+		return &v1beta1.DeploymentList{}
+	}
+
+	body, readErr := ioutil.ReadAll(res.Body)
+	if readErr != nil {
+		log.Println(readErr)
+		return &v1beta1.DeploymentList{}
+	}
+
+	deploymentList := v1beta1.DeploymentList{}
+	jsonErr := json.Unmarshal(body, &deploymentList)
+	if jsonErr != nil {
+		log.Println(jsonErr)
+		return &v1beta1.DeploymentList{}
+	}
+
+	return &deploymentList
 }
 
-func getDeploymentLoop(delay time.Duration) {
-	// Discover kubeconfig file
-	if home := homeDir(); home != "" {
-		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
-	} else {
-		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+func getRemoteDeploymentsLoop(remotes []string, delay time.Duration) {
+	// Loop
+	for {
+		time.Sleep(delay * time.Second)
+		for _, url := range remotes {
+			aggregateDeployments[url] = getRemoteDeployments("http://" + url + "/api/deployments")
+		}
 	}
-	flag.Parse()
+}
 
-	kubeconfigpath := *kubeconfig
-	config, err := clientcmd.LoadFromFile(kubeconfigpath)
+func getLocalDeploymentsLoop(delay time.Duration) {
+	config, err := rest2.InClusterConfig()
 	if err != nil {
 		panic(err.Error())
 	}
-
-	var clientsets []configAndClientSet
-
-	for context := range config.Contexts {
-		cfg, err := buildConfigFromFlags(context, kubeconfigpath)
-		if err != nil {
-			panic(err.Error())
-		}
-		cs, err := kubernetes.NewForConfig(cfg)
-		if err != nil {
-			panic(err.Error())
-		}
-
-		clientsets = append(clientsets, configAndClientSet{config: cfg, clientset: cs})
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		panic(err.Error())
 	}
 
 	// Loop
 	for {
 		time.Sleep(delay * time.Second)
-		for cs := range clientsets {
-			deployments[clientsets[cs].config.Host] = getDeployments("", clientsets[cs].clientset)
-		}
+		localDeployments = getLocalDeployments("", clientset)
 	}
 }
 
@@ -107,7 +144,7 @@ func homeDir() string {
 }
 
 // Get deployment list
-func getDeployments(namespace string, cs *kubernetes.Clientset) *v1beta1.DeploymentList {
+func getLocalDeployments(namespace string, cs *kubernetes.Clientset) *v1beta1.DeploymentList {
 	deployments, err := cs.ExtensionsV1beta1().Deployments(namespace).List(metav1.ListOptions{})
 	if err != nil {
 		fmt.Println(err.Error())
@@ -117,7 +154,13 @@ func getDeployments(namespace string, cs *kubernetes.Clientset) *v1beta1.Deploym
 }
 
 // Just return the deployment struct as JSON
+func aggregateDeploymentHandler(c *gin.Context) {
+	c.Header("Content-Type", "application/json")
+	c.JSON(http.StatusOK, aggregateDeployments)
+}
+
+// Just return the deployment struct as JSON
 func deploymentHandler(c *gin.Context) {
 	c.Header("Content-Type", "application/json")
-	c.JSON(http.StatusOK, deployments)
+	c.JSON(http.StatusOK, localDeployments)
 }
