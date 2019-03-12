@@ -12,7 +12,7 @@ COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /etc/passwd /etc/passwd
 COPY --from=builder /go/src/k8s-repetitious/main /app/
-COPY --from=builder /go/src/k8s-repetitious/views /app/
+COPY --from=builder /go/src/k8s-repetitious/views /app/views/
 WORKDIR /app
 USER appuser
 ENTRYPOINT ["./main"]
