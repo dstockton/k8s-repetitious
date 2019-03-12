@@ -15,13 +15,30 @@ class Home extends React.Component {
         deployments: res,
         allDeployments: res
       });
-      this.filterList();
+      this.filterList(true);
       setTimeout(this.serverRequest, 1000);
     });
   }
 
+  readCookie(name, fallback) {
+    var r = Cookies.get(name);
+    if (r == null) {
+      return fallback;
+    }
+    return r;
+  }
+
+  readCookies() {
+    var search = this.readCookie('filter-search');
+    var failedOnly = this.readCookie('filter-failedOnly');
+
+    $('#filter-search').val( search );
+    $('#filter-failedOnly').prop('checked', (failedOnly=='true'));
+  }
+
   componentDidMount() {
     this.serverRequest();
+    this.readCookies();
   }
 
   filterMatch(item, searchTerm, failedOnly) {
@@ -29,12 +46,14 @@ class Home extends React.Component {
   }
 
   filterList() {
-    var cluster = document.getElementById('filter-cluster').value;
-    var searchTerm = document.getElementById('filter-search').value.toLowerCase();
-    var failedOnly = document.getElementById('filter-failedOnly').checked;
+    var cluster = $('#filter-cluster').val();
+    var searchTerm = $('#filter-search').val().toLowerCase();
+    var failedOnly = $('#filter-failedOnly').prop('checked');
 
     // Yes, it's a bit shit...
     if (this === undefined) {
+      Cookies.set('filter-search', searchTerm);
+      Cookies.set('filter-failedOnly', failedOnly);
       return;
     }
 
@@ -81,7 +100,7 @@ class Home extends React.Component {
                   {
                     Object.keys(this.state.allDeployments).map(cluster=> {
                       if (this.state.allDeployments[cluster].items != null) {
-                        return <option>{cluster}</option>;
+                        return <option value={cluster}>{cluster}</option>;
                       }
                     })
                   }
