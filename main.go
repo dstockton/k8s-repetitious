@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -25,24 +24,14 @@ var aggregateDeployments map[string]*v1beta1.DeploymentList
 // Caches the local deployment list
 var localDeployments *v1beta1.DeploymentList
 
-type configAndClientSet struct {
-	config    *rest2.Config
-	clientset *kubernetes.Clientset
-}
-
-func getEnv(key, fallback string) string {
-	if value, ok := os.LookupEnv(key); ok {
-		return value
-	}
-	return fallback
-}
-
+// Main entry point
 func main() {
 	// Initialise the empty aggregated deployment lists
 	aggregateDeployments = make(map[string]*v1beta1.DeploymentList)
 
 	// Load list of repetious endpoints
-	remotes := strings.Split(getEnv("REPETIOUS_REMOTES", "127.0.0.1:3000"), ",")
+	httpPort := getEnv("HTTP_PORT", "8080")
+	remotes := strings.Split(getEnv("REPETIOUS_REMOTES", "127.0.0.1:"+httpPort), ",")
 
 	remotePollDelay, _ := time.ParseDuration(getEnv("REMOTE_POLL_DELAY", "5"))
 	localPollDelay, _ := time.ParseDuration(getEnv("LOCAL_POLL_DELAY", "5"))
@@ -69,38 +58,59 @@ func main() {
 	}
 
 	// Start the listener
-	fmt.Println("Listening on port 3000...")
-	router.Run(":3000")
+	log.Println("Listening on port " + httpPort + "...")
+	router.Run(":" + httpPort)
+	log.Println("Exiting")
 }
 
+// Helper function to get environment variables
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
+}
+
+// Get a list of deployments from a single remote URL
 func getRemoteDeployments(url string) *v1beta1.DeploymentList {
-	spaceClient := http.Client{
+	// Setup HTTP client
+	httpClient := http.Client{
 		Timeout: time.Second * 2, // Maximum of 2 secs
 	}
 
+	// Initialise the request parameters...
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
+		// Log any error but continue gracefully
 		log.Println(err)
 		return &v1beta1.DeploymentList{}
 	}
 
-	req.Header.Set("User-Agent", "repetitious-k8s-dashboard")
+	// Let's be a good citizen
+	req.Header.Set("User-Agent", "repetitious-k8s-dashboard-v1")
 
-	res, getErr := spaceClient.Do(req)
+	// Make the HTTP request
+	res, getErr := httpClient.Do(req)
 	if getErr != nil {
+		// Log any error but continue gracefully
 		log.Println(getErr)
 		return &v1beta1.DeploymentList{}
 	}
 
+	// Read the entire body of the HTTP response buffer
 	body, readErr := ioutil.ReadAll(res.Body)
 	if readErr != nil {
+		// Log any error but continue gracefully
 		log.Println(readErr)
 		return &v1beta1.DeploymentList{}
 	}
 
+	// Ready a variable for the response
 	deploymentList := v1beta1.DeploymentList{}
+	// Unmarshal the JSON to DeploymentList object
 	jsonErr := json.Unmarshal(body, &deploymentList)
 	if jsonErr != nil {
+		// Log any error but continue gracefully
 		log.Println(jsonErr)
 		return &v1beta1.DeploymentList{}
 	}
@@ -108,58 +118,59 @@ func getRemoteDeployments(url string) *v1beta1.DeploymentList {
 	return &deploymentList
 }
 
+// Continuously retrieve deployments from each remote endpoint
 func getRemoteDeploymentsLoop(remotes []string, delay time.Duration) {
-	// Loop
 	for {
 		time.Sleep(delay * time.Second)
+
+		// For each remote agent
 		for _, url := range remotes {
 			aggregateDeployments[url] = getRemoteDeployments("http://" + url + "/api/deployments")
 		}
 	}
 }
 
+// Continuously retrieve deployments from local cluster kube API
 func getLocalDeploymentsLoop(delay time.Duration) {
+	// Get current cluster kube API configuration using standard conventions
 	config, err := rest2.InClusterConfig()
 	if err != nil {
-		panic(err.Error())
-	}
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
+		// It's OK to panic here as it's only at start-up
 		panic(err.Error())
 	}
 
-	// Loop
+	// Setup kube API client using aquired config
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		// It's OK to panic here as it's only at start-up
+		panic(err.Error())
+	}
+
+	// Loop forever...
 	for {
 		time.Sleep(delay * time.Second)
 		localDeployments = getLocalDeployments("", clientset)
 	}
 }
 
-// User home directory (win vs other)
-func homeDir() string {
-	if h := os.Getenv("HOME"); h != "" {
-		return h
-	}
-	return os.Getenv("USERPROFILE") // windows
-}
-
-// Get deployment list
+// Get the local kube API deployment list
 func getLocalDeployments(namespace string, cs *kubernetes.Clientset) *v1beta1.DeploymentList {
 	deployments, err := cs.ExtensionsV1beta1().Deployments(namespace).List(metav1.ListOptions{})
 	if err != nil {
-		fmt.Println(err.Error())
+		// Log any error but continue gracefully
+		log.Println(err)
 		return &v1beta1.DeploymentList{}
 	}
 	return deployments
 }
 
-// Just return the deployment struct as JSON
+// Just return the in-memory aggregate deployment struct as JSON
 func aggregateDeploymentHandler(c *gin.Context) {
 	c.Header("Content-Type", "application/json")
 	c.JSON(http.StatusOK, aggregateDeployments)
 }
 
-// Just return the deployment struct as JSON
+// Just return the in-memory local deployment struct as JSON
 func deploymentHandler(c *gin.Context) {
 	c.Header("Content-Type", "application/json")
 	c.JSON(http.StatusOK, localDeployments)
