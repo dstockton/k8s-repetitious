@@ -3,17 +3,21 @@ class Home extends React.Component {
     super(props);
     this.state = {
       allDeployments: {},
-      deployments: {}
+      deployments: {},
+      allPods: {},
+      pods: {}
     };
 
     this.serverRequest = this.serverRequest.bind(this);
   }
 
   serverRequest() {
-    $.get("/api/aggregate-deployments", res => {
+    $.get("/api/aggregated-resources", res => {
       this.setState({
-        deployments: res,
-        allDeployments: res
+        deployments: res['deployments'],
+        allDeployments: res['deployments'],
+        pods: res['pods'],
+        allPods: res['pods']
       });
       this.filterList(true);
       setTimeout(this.serverRequest, 1000);
@@ -40,11 +44,11 @@ class Home extends React.Component {
     this.serverRequest();
     this.readCookies();
   }
-
+/*
   filterMatch(item, searchTerm, failedOnly) {
     return item.metadata.name.toLowerCase().search(searchTerm.toLowerCase()) !== -1;
   }
-
+*/
   filterList() {
     var cluster = $('#filter-cluster').val();
     var searchTerm = $('#filter-search').val().toLowerCase();
@@ -81,15 +85,40 @@ class Home extends React.Component {
         return obj;
       }, {});
 
+      var pods = this.state.allPods;
+      pods = Object.keys(pods)
+        .filter(key =>
+            cluster == '*' // all
+            ||
+            key == cluster // specific cluster
+          )
+        .reduce((obj, key) => {
+          obj[key] = pods[key]
+          if (obj[key].items !=null){
+            obj[key].items = obj[key].items.filter(function(item){
+              var showIt = item.metadata.name.toLowerCase().search(searchTerm) !== -1;
+              showIt = showIt || item.metadata.namespace.toLowerCase().search(searchTerm) !== -1;
+              showIt = showIt || item.spec.containers.map(container=> {
+                return container.image.toLowerCase().includes(searchTerm);
+              }).includes(true);
+              showIt = showIt && (!"running".split(',').includes( Object.keys(item.status.containerStatuses[0].state)[0] ) || !failedOnly);
+
+              return showIt;
+            });
+          }
+          return obj;
+        }, {});
+
     this.setState({
-      deployments: deployments
+      deployments: deployments,
+      pods: pods
     });
   }
 
   render() {
     return (
       <div className="container">
-        <h2>Deployments</h2>
+        <h2>Repetitious Monitoring System</h2>
 
         <form>
           <div className="row">
@@ -123,11 +152,20 @@ class Home extends React.Component {
 
         <div className="row">
           <div className="container">
-            {
+          {
               Object.keys(this.state.deployments).map(cluster=> {
                 if (this.state.deployments[cluster].items != null) {
                   return this.state.deployments[cluster].items.map(deployment=> {
                     return <Deployment cluster={cluster} deployment={deployment} />;
+                  });
+                }
+              })
+            }
+            {
+              Object.keys(this.state.pods).map(cluster=> {
+                if (this.state.pods[cluster].items != null) {
+                  return this.state.pods[cluster].items.map(pod=> {
+                    return <Pod cluster={cluster} pod={pod} />;
                   });
                 }
               })
@@ -211,6 +249,80 @@ class Deployment extends React.Component {
               !this.isGoodState() &&
               <span> ({this.getReplicas()-this.getReadyReplicas()} failing replica{(this.getReplicas()-this.getReadyReplicas()) > 1 ? 's' : ''})</span>
             }
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
+class Pod extends React.Component {
+  checkNested(obj) {
+    var args = Array.prototype.slice.call(arguments, 1);
+
+    for (var i = 0; i < args.length; i++) {
+      if (!obj || !obj.hasOwnProperty(args[i])) {
+        return false;
+      }
+      obj = obj[args[i]];
+    }
+    return true;
+  }
+
+  isGoodPodState() {
+    return "running".split(',').includes(this.firstContainerState());
+  }
+
+  getStateClass() {
+    if (this.isGoodPodState()) {
+      return 'state-good'
+    } else {
+      return 'state-bad'
+    }
+  }
+
+  getContainers() {
+    var c = [];
+    if ( this.checkNested(this.props.pod, 'spec', 'containers') ) {
+      c = this.props.pod.spec.containers;
+    }
+    return c;
+  }
+
+  firstContainerState() {
+    return Object.keys(this.props.pod.status.containerStatuses[0].state)[0];
+  }
+
+  render() {
+    if (this.props.pod==null) {
+      return 'null1';
+    }
+    return (
+      <div className="col-xs-12">
+        <div className="panel panel-default">
+          <div className="panel-heading">
+            <b>Cluster:</b> {this.props.cluster}
+            &nbsp;&nbsp;&nbsp;
+            <b>Pod:</b> {this.props.pod.metadata.namespace} / {this.props.pod.metadata.name}
+          </div>
+          <div className={'panel-body pod-hld ' + this.getStateClass()}>
+            {this.getContainers().map(function(container, i) {
+              return <Container key={i} container={container} />;
+            })}
+          </div>
+          <div className="panel-footer">
+            <div className="row">
+              <div className="col-xs-6">
+                {
+                this.props.pod.metadata.hasOwnProperty('ownerReferences') &&
+                <span><strong>Owned by:</strong> {this.props.pod.metadata.ownerReferences[0].kind} / {this.props.pod.metadata.ownerReferences[0].name}</span>
+                || <span>Orphaned pod</span>
+                }
+              </div>
+              <div className="col-xs-6">
+                <span><strong>Status:</strong> {this.firstContainerState()}</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
